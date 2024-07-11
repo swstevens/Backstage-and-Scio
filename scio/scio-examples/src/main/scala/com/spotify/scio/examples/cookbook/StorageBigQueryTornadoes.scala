@@ -1,0 +1,85 @@
+/*
+ * Copyright 2019 Spotify AB.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+// Example: Read using BigQuery Storage Read API.
+// Usage:
+
+// `sbt "runMain com.spotify.scio.examples.extra.StorageBigQueryTornadoes
+// --project=[PROJECT] --runner=DataflowRunner --region=[REGION NAME]
+// --output=[PROJECT]:[DATASET].[TABLE]"`
+package com.spotify.scio.examples.cookbook
+
+import com.spotify.scio.bigquery._
+import com.spotify.scio.ContextAndArgs
+import com.spotify.scio.examples.common.ExampleData
+import com.google.api.services.bigquery.model.{TableFieldSchema, TableSchema}
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.Write.Method
+
+import scala.jdk.CollectionConverters._
+
+object StorageBigQueryTornadoes {
+  def main(cmdlineArgs: Array[String]): Unit = {
+    // Create `ScioContext` and `Args`
+    val (sc, args) = ContextAndArgs(cmdlineArgs)
+
+    // Schema for result BigQuery table
+    val schema = new TableSchema().setFields(
+      List(
+        new TableFieldSchema().setName("month").setType("INTEGER"),
+        new TableFieldSchema().setName("tornado_count").setType("INTEGER")
+      ).asJava
+    )
+
+    // Open a BigQuery table as a `SCollection[TableRow]`
+    val table = Table.Spec(args.getOrElse("input", ExampleData.WEATHER_SAMPLES_TABLE))
+    val resultTap = sc
+      .bigQueryStorage(
+        table,
+        selectedFields = List("tornado", "month"),
+        rowRestriction = "tornado = true"
+      )
+      .map(_.getLong("month"))
+      // Count occurrences of each unique month to get `(Long, Long)`
+      .countByValue
+      // Map `(Long, Long)` tuples into result `TableRow`s
+      .map(kv => TableRow("month" -> kv._1, "tornado_count" -> kv._2))
+      // Save result as a BigQuery table
+      .saveAsBigQueryTable(
+        table = Table.Spec(args("output")),
+        schema = schema,
+        writeDisposition = WRITE_TRUNCATE,
+        createDisposition = CREATE_IF_NEEDED,
+        method = Method.STORAGE_WRITE_API,
+        successfulInsertsPropagation = true
+      )
+
+    // Access the inserted records
+    resultTap
+      .output(BigQueryIO.SuccessfulStorageApiInserts)
+      .count
+      .debug(prefix = "Successful inserts: ")
+
+    // Access the failed records
+    resultTap
+      .output(BigQueryIO.FailedStorageApiInserts)
+      .count
+      .debug(prefix = "Failed inserts: ")
+
+    // Execute the pipeline
+    sc.run()
+  }
+}
